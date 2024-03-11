@@ -1,0 +1,2 @@
+target/
+terraform-scripts/*.terraform.lock.hcl

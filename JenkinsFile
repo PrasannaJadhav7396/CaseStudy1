@@ -1,0 +1,129 @@
+pipeline {
+  agent {
+    label "DevEnv"
+  }
+  environment {
+    AWS_ACCOUNT_ID = "1234567910112" 
+    AWS_DEFAULT_REGION = "us-east-1"
+    IMAGE_REPO_NAME = "casestudy1-java-application"
+    S3BUCKET = "casestudy1-tfscripts/dev"
+    REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${IMAGE_REPO_NAME}"
+    DOCKERHUB_CREDENTIALS = credentials('JavaAppDockerHub')
+    DOCKERHUB_USER = "PrasannaJadhav7396"
+    GITHUB_CODE_REPO_URL = ${GITHUB_CODE_REPO_URL}	
+	SONARQUBE_URL  = ${SONARQUBE_URL} // Can be passed at runtime
+	APP_IMAGE_VERSION = "latest" // latest since its dev environment
+  }
+  stages {
+    stage('Git Checkout') {
+      steps {
+        script {
+          properties([pipelineTriggers([pollSCM('H */1 * * *')])])
+        }
+        checkout([$class: 'GitSCM', branches: [[name: '*/dev']], extensions: [], userRemoteConfigs: [[credentialsId: 'myGithub', url: '${GITHUB_CODE_REPO_URL}']]])
+      }
+    }  
+    stage('Build Application') {
+      steps {
+        sh 'mvn clean package'
+      }
+      post {
+        success {
+          echo "Now Archiving the Artifacts...."
+          archiveArtifacts artifacts: '**/*.war', onlyIfSuccessfult: true, fingerprint: true
+        }
+      }
+    }
+    stage('Junit test report generation') {
+      steps {
+	    sh 'mvn test'
+        sh 'mvn surefire-report:report-only'
+      }
+    }		
+    stage('SonarQube Analysis') {
+      steps {
+        withSonarQubeEnv('sonarqube-10.4.0') {
+          sh "mvn sonar:sonar -Dsonar.projectKey=CaseStudy1-JavaApp-Dev"
+        }
+      }
+	  post {
+        always {
+            script {
+                def coverage = script {
+                    return sh(script: "curl -s ${SONARQUBE_URL}/api/measures/component?componentKey=CaseStudy1-JavaApp-Dev&metricKeys=coverage", returnStdout: true).trim()
+                    }
+                def coverageValue = (readJSON(text: coverage)).component.measures[0].value.toFloat()
+                    if (coverageValue < 80.0) {
+                        error "Code coverage is less than 80% (${coverageValue}%)."
+                    }
+                }
+            }
+        }
+    }
+    stage('Docker Build Image') {
+      steps {
+        script {
+          dockerImage = docker.build "${REPOSITORY_URI}:${APP_IMAGE_VERSION}"
+        }
+      }
+    }	
+    stage('Pushing Docker Image to ECR') {
+      steps {
+        script {
+          sh "aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        }
+      }
+	  steps {
+		// Perform Clair scan on Docker image
+		clair analyze imageName: '${IMAGE_REPO_NAME}:${APP_IMAGE_VERSION}'
+	  }	  
+      post {
+        success {
+          script {
+            sh "docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${APP_IMAGE_VERSION}"
+          }
+        }
+      }
+    }
+    stage('Terraform - Infra Deployment') {
+      steps {
+        withCredentials([
+          [ $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "AWS_CREDENTIALS",
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
+          ]){
+          sh 'cd terraform-scripts && sudo terraform init && sudo terraform plan && sudo terraform apply -auto-approve'
+        }
+      }
+    }
+    stage('Push Terraform scripts to AWS S3') {
+      steps {
+        withCredentials([
+          [ $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "AWS_CREDENTIALS",
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+          ]]){
+          s3Upload acl: 'Private', bucket: "${S3BUCKET}", includePathPattern: '*.tf*', excludePathPattern: '*.backup' , workingDir: 'dev-tf-scripts'
+        }
+      }
+    }
+	stage('Deployment - DEVELOPMENT') {
+      steps {
+        //Adding the node in kubeconfig
+		sh 'sudo aws eks --region "${AWS_DEFAULT_REGION}" update-kubeconfig --name eks_cluster_nodejs'
+		//Running k8-manifest files
+		sh 'cd k8-manifest && sudo kubectl apply -f createNamespace.yml && sudo kubectl apply -f app-deployment.yml && sudo kubectl apply -f loadbalancer-sv.yml'
+        }
+      }
+    }
+  }
+  post {
+    always {
+        emailext body: "Deployment Status - ${currentBuild.currentResult}: Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}",
+        recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider']],
+        subject: "Dev Deployment Status - ${currentBuild.currentResult}: Job ${env.JOB_NAME}"
+    }
+  }
+}
