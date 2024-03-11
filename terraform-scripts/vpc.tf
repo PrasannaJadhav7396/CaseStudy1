@@ -2,7 +2,7 @@ module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "3.14.0"
 
-  name = "vpc-module-nodejs"
+  name = "vpc-module-casestudy1"
   cidr = "10.0.0.0/16"
 
   # azs             = slice(data.aws_availability_zones.available.names, 0, 1)
