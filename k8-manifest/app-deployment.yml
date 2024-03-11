@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: casestudy1-app
+  namespace: myapp
+  labels:
+    app: casestudy1-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: casestudy1-app
+  template:
+    metadata:
+      labels:
+        app: casestudy1-app
+    spec:
+      containers:
+        - name: node-myapp
+          image: 894328728902.dkr.ecr.us-east-1.amazonaws.com/jenkins-casestudy1
+          ports:
+            - protocol: TCP
+              containerPort: 8050
+              name : web     
