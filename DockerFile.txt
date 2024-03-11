@@ -1,0 +1,28 @@
+# Use a base image with Java installed
+FROM openjdk:11-jre-slim
+
+# Projects Description 
+LABEL description="Case Study 1 Java Application"
+
+# Set maintainer details
+MAINTAINER Prasanna Jadhav
+
+# Change user to root
+USER root
+
+# Update the base packages
+RUN \
+ apt-get update &&\
+ apt-get install -y bash curl
+ 
+# Set the working directory inside the container
+WORKDIR /app
+ 
+# Copy the WAR file from the host into the container at /app
+COPY casestudy1.war /app/casestudy1.war
+ 
+# Expose the port on which your application will run
+EXPOSE 8080
+ 
+# Command to run your application when the container starts
+CMD ["java", "-jar", "casestudy1.war"]
