@@ -1,18 +1,18 @@
 pipeline {
   agent {
-    label "DevEnv"
+    label "ProdEnv"
   }
   environment {
     AWS_ACCOUNT_ID = "1234567910112" 
     AWS_DEFAULT_REGION = "us-east-1"
     IMAGE_REPO_NAME = "casestudy1-java-application"
-    S3BUCKET = "casestudy1-tfscripts/dev"
+    S3BUCKET = "casestudy1-tfscripts/release"
     REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${IMAGE_REPO_NAME}"
     DOCKERHUB_CREDENTIALS = credentials('JavaAppDockerHub')
     DOCKERHUB_USER = "PrasannaJadhav7396"
-    GITHUB_CODE_REPO_URL = ${GITHUB_CODE_REPO_URL}	
-	SONARQUBE_URL  = ${SONARQUBE_URL} // Can be passed at runtime
-	APP_IMAGE_VERSION = "latest" // latest since its dev environment
+	GITHUB_CODE_REPO_URL = ${GITHUB_CODE_REPO_URL}	
+    APP_IMAGE_VERSION = ${TAG_IMAGE_VERSION} // Can be passed at runtime for any image tag used for production release
+	SONARQUBE_URL  = ${SONARQUBE_URL} // Can be passed at runtime	
   }
   stages {
     stage('Git Checkout') {
@@ -20,37 +20,20 @@ pipeline {
         script {
           properties([pipelineTriggers([pollSCM('H */1 * * *')])])
         }
-        checkout([$class: 'GitSCM', branches: [[name: '*/dev']], extensions: [], userRemoteConfigs: [[credentialsId: 'myGithub', url: '${GITHUB_CODE_REPO_URL}']]])
+        checkout([$class: 'GitSCM', branches: [[name: '*/release']], extensions: [], userRemoteConfigs: [[credentialsId: 'myGithub', url: '${GITHUB_CODE_REPO_URL}']]])
       }
-    }  
-    stage('Build Application') {
-      steps {
-        sh 'mvn clean package'
-      }
-      post {
-        success {
-          echo "Now Archiving the Artifacts...."
-          archiveArtifacts artifacts: '**/*.war', onlyIfSuccessfult: true, fingerprint: true
-        }
-      }
-    }
-    stage('Junit test report generation') {
-      steps {
-	    sh 'mvn test'
-        sh 'mvn surefire-report:report-only'
-      }
-    }		
+    }   
     stage('SonarQube Analysis') {
       steps {
         withSonarQubeEnv('sonarqube-10.4.0') {
-          sh "mvn sonar:sonar -Dsonar.projectKey=CaseStudy1-JavaApp-Dev"
+          sh "mvn sonar:sonar -Dsonar.projectKey=CaseStudy1-JavaApp-Prod"
         }
       }
 	  post {
         always {
             script {
                 def coverage = script {
-                    return sh(script: "curl -s ${SONARQUBE_URL}/api/measures/component?componentKey=CaseStudy1-JavaApp-Dev&metricKeys=coverage", returnStdout: true).trim()
+                    return sh(script: "curl -s ${SONARQUBE_URL}/api/measures/component?componentKey=CaseStudy1-JavaApp-Prod&metricKeys=coverage", returnStdout: true).trim()
                     }
                 def coverageValue = (readJSON(text: coverage)).component.measures[0].value.toFloat()
                     if (coverageValue < 80.0) {
@@ -66,7 +49,13 @@ pipeline {
           dockerImage = docker.build "${REPOSITORY_URI}:${APP_IMAGE_VERSION}"
         }
       }
-    }	
+    }
+    stage('Junit test report generation') {
+      steps {
+	    sh 'mvn test'
+        sh 'mvn surefire-report:report-only'
+      }
+    }		
     stage('Pushing Docker Image to ECR') {
       steps {
         script {
@@ -76,7 +65,7 @@ pipeline {
 	  steps {
 		// Perform Clair scan on Docker image
 		clair analyze imageName: '${IMAGE_REPO_NAME}:${APP_IMAGE_VERSION}'
-	  }	  
+	  }
       post {
         success {
           script {
@@ -87,6 +76,14 @@ pipeline {
     }
     stage('Terraform - Infra Deployment') {
       steps {
+          emailext body: "Please approve the below url build for Infra Deployment \n ${env.BUILD_URL} \n NOTE: If not approved, build will be aborted by default",
+          recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider']],
+          mimeType: 'text/html',
+          subject: "Prod Infra Deployment Approval - Build : ${env.BUILD_NUMBER} | Job: ${env.JOB_NAME}"
+
+          timeout(time: 3, unit: 'DAYS') {
+          input message: 'Approve Infra Prod Deployment?'	    
+		}
         withCredentials([
           [ $class: 'AmazonWebServicesCredentialsBinding',
             credentialsId: "AWS_CREDENTIALS",
@@ -95,27 +92,35 @@ pipeline {
           ]){
           sh 'cd terraform-scripts && sudo terraform init && sudo terraform plan && sudo terraform apply -auto-approve'
         }
+	   }
       }
     }
     stage('Push Terraform scripts to AWS S3') {
-      steps {
+      steps {	   
         withCredentials([
           [ $class: 'AmazonWebServicesCredentialsBinding',
             credentialsId: "AWS_CREDENTIALS",
             accessKeyVariable: 'AWS_ACCESS_KEY_ID',
             secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
           ]]){
-          s3Upload acl: 'Private', bucket: "${S3BUCKET}", includePathPattern: '*.tf*', excludePathPattern: '*.backup' , workingDir: 'dev-tf-scripts'
+          s3Upload acl: 'Private', bucket: "${S3BUCKET}", includePathPattern: '*.tf*', excludePathPattern: '*.backup' , workingDir: 'release-tf-scripts'
         }
       }
     }
-	stage('Deployment - DEVELOPMENT') {
+	stage('Deployment - PRODUCTION') {
       steps {
-        //Adding the node in kubeconfig
-		sh 'sudo aws eks --region "${AWS_DEFAULT_REGION}" update-kubeconfig --name eks_cluster_nodejs'
-		//Running k8-manifest files
-		sh 'cd k8-manifest && sudo kubectl apply -f createNamespace.yml && sudo kubectl apply -f app-deployment.yml && sudo kubectl apply -f loadbalancer-sv.yml'
+          emailext body: "Please approve the below url build for Application Deployment \n ${env.BUILD_URL} \n NOTE: If not approved, build will be aborted by default",
+          recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider']],
+          mimeType: 'text/html',
+          subject: "Prod Application Deployment Approval - Build : ${env.BUILD_NUMBER} | Job: ${env.JOB_NAME}"
+
+          timeout(time: 3, unit: 'DAYS') {
+          input message: 'Approve Application Prod Deployment?'
         }
+        //Adding the node in kubeconfig
+	    sh 'sudo aws eks --region "${AWS_DEFAULT_REGION}" update-kubeconfig --name eks_cluster_nodejs'
+	    //Running k8-manifest files
+	    sh 'cd k8-manifest && sudo kubectl apply -f createNamespace.yml && sudo kubectl apply -f app-deployment.yml && sudo kubectl apply -f loadbalancer-sv.yml'
       }
     }
   }
@@ -123,7 +128,7 @@ pipeline {
     always {
         emailext body: "Deployment Status - ${currentBuild.currentResult}: Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}",
         recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider']],
-        subject: "Dev Deployment Status - ${currentBuild.currentResult}: Job ${env.JOB_NAME}"
+        subject: "Production Deployment Status - ${currentBuild.currentResult}: Job ${env.JOB_NAME}"
     }
   }
 }
