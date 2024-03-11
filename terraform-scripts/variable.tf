@@ -1,5 +1,5 @@
 variable "cluster-name" {
-  default = "eks-cluster-nodejs"
+  default = "eks-cluster-java"
   type    = string
 }
 
