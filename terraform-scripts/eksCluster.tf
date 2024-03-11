@@ -1,6 +1,6 @@
 
 resource "aws_eks_cluster" "aws_eks" {
-  name     = "eks_cluster_nodejs"
+  name     = "eks_cluster_casetsudy1"
   role_arn = aws_iam_role.eks_cluster.arn
 
   vpc_config {
@@ -13,13 +13,13 @@ resource "aws_eks_cluster" "aws_eks" {
   ]
 
   tags = {
-    Name = "EKS_Cluster_NodeJsApp"
+    Name = "EKS_Cluster_JavaApp"
   }
 }
 
 resource "aws_eks_node_group" "node" {
   cluster_name    = aws_eks_cluster.aws_eks.name
-  node_group_name = "nodeJsApp"
+  node_group_name = "JavaApp"
   node_role_arn   = aws_iam_role.eks_nodes.arn
   subnet_ids      = module.vpc.public_subnets
   instance_types = ["t2.small"]
